@@ -62,6 +62,20 @@ const TOOLS = [
     }
   },
   {
+    name: 'delegate_agy',
+    description: 'Delegate a task to AGY (Antigravity) and return its output verbatim',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task: {
+          type: 'string',
+          description: 'The task to delegate to AGY'
+        }
+      },
+      required: ['task']
+    }
+  },
+  {
     name: 'delegate_codex',
     description: 'Delegate a task to Codex and return its output verbatim',
     inputSchema: {
@@ -77,7 +91,7 @@ const TOOLS = [
   },
   {
     name: 'check_agents',
-    description: 'Report availability of all 5 target CLIs (claude, gemini, codex, cursor, kilo) — mirrors /chorus check-all',
+    description: 'Report availability of all 6 target CLIs (claude, gemini, codex, cursor, kilo, agy) — mirrors /chorus check-all',
     inputSchema: {
       type: 'object',
       properties: {}
@@ -116,7 +130,7 @@ const TOOLS = [
   },
   {
     name: 'parallel_debug',
-    description: 'Parallel root-cause hypotheses from five agents for a given symptom. Returns ranked hypotheses per agent — the host synthesizes an investigation plan.\n\nstrict: if true, every agent slot is preserved and missing agents appear as [error: ...]; if false (default), missing agents are filtered out and a "⚠ Skipped: ..." line is prepended.',
+    description: 'Parallel root-cause hypotheses from six agents for a given symptom. Returns ranked hypotheses per agent — the host synthesizes an investigation plan.\n\nstrict: if true, every agent slot is preserved and missing agents appear as [error: ...]; if false (default), missing agents are filtered out and a "⚠ Skipped: ..." line is prepended.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -144,7 +158,7 @@ const TOOLS = [
         },
         agent: {
           type: 'string',
-          enum: ['claude', 'gemini', 'codex', 'cursor', 'kilo'],
+          enum: ['claude', 'gemini', 'codex', 'cursor', 'kilo', 'agy'],
           description: 'Which agent to consult. Defaults to gemini.'
         }
       },
@@ -153,7 +167,7 @@ const TOOLS = [
   },
   {
     name: 'vote',
-    description: 'Put a yes/no proposition to all five agents and tally their votes (YES / NO / ABSTAIN). Returns a tally table and per-agent rationale — simpler than council when you need a decision signal rather than synthesis.',
+    description: 'Put a yes/no proposition to all six agents and tally their votes (YES / NO / ABSTAIN). Returns a tally table and per-agent rationale — simpler than council when you need a decision signal rather than synthesis.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -175,6 +189,7 @@ const BINARIES = {
   codex: 'codex',
   cursor: 'agent',
   kilo: 'kilo',
+  agy: 'agy',
 };
 
 function checkCli(binary) {
@@ -361,12 +376,44 @@ async function delegateToCodex(task) {
   });
 }
 
+async function delegateToAgy(task) {
+  const check = checkCli('agy');
+  if (!check.available) {
+    throw new Error(`AGY CLI not available: ${check.error}. Please install AGY.`);
+  }
+
+  return new Promise((resolve, reject) => {
+    const proc = spawn('agy', ['--mode', 'accept-edits', '--dangerously-skip-permissions', '--print', task], {
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
+
+    let stdout = '';
+    let stderr = '';
+
+    proc.stdout.on('data', (data) => { stdout += data.toString(); });
+    proc.stderr.on('data', (data) => { stderr += data.toString(); });
+
+    proc.on('close', (code) => {
+      if (code !== 0 && code !== null) {
+        reject(new Error(`AGY exited with code ${code}: ${stderr || stdout}`));
+      } else {
+        resolve(stdout);
+      }
+    });
+
+    proc.on('error', (err) => {
+      reject(new Error(`Failed to run AGY: ${err.message}`));
+    });
+  });
+}
+
 const DELEGATE_FNS = {
   claude: delegateToClaude,
   gemini: delegateToGemini,
   codex: delegateToCodex,
   cursor: delegateToCursor,
   kilo: delegateToKilo,
+  agy: delegateToAgy,
 };
 
 // ── orchestration helpers ─────────────────────────────────────────────────────
@@ -457,6 +504,14 @@ async function runCouncil(task, strict = false) {
         `Focus on: readability, naming, long-term tech debt, whether this will be easy to change later.\n` +
         `Be concise — bullet points preferred.\n\nTask: ${task}`
       )
+    },
+    {
+      name: 'agy',
+      fn: () => delegateToAgy(
+        `You are the PERFORMANCE reviewer in an LLM council.\n` +
+        `Focus on: performance bottlenecks, resource usage, scalability, optimization opportunities.\n` +
+        `Be concise — bullet points preferred.\n\nTask: ${task}`
+      )
     }
   ];
   return runParallelWithDegradation(tasks, strict);
@@ -509,6 +564,14 @@ async function runParallelReview(strict = false) {
         `Focus on: readability, naming clarity, long-term tech debt introduced.\n` +
         `Be concise — numbered findings.\n\n${diff}`
       )
+    },
+    {
+      name: 'agy',
+      fn: () => delegateToAgy(
+        `Review these code changes for PERFORMANCE.\n` +
+        `Focus on: performance regressions, inefficient patterns, resource leaks, optimization opportunities.\n` +
+        `Be concise — numbered findings.\n\n${diff}`
+      )
     }
   ];
   return runParallelWithDegradation(tasks, strict);
@@ -524,7 +587,8 @@ async function runParallelDebug(symptom, strict = false) {
     { name: 'gemini',  fn: () => delegateToGemini(prompt('infrastructure, concurrency, external dependencies, environment')) },
     { name: 'codex',   fn: () => delegateToCodex(prompt('edge cases in input handling, type coercion, off-by-one errors')) },
     { name: 'cursor',  fn: () => delegateToCursor(prompt('framework, library, and third-party integration issues')) },
-    { name: 'kilo',    fn: () => delegateToKilo(prompt('naming, types, readability, and long-term maintainability')) }
+    { name: 'kilo',    fn: () => delegateToKilo(prompt('naming, types, readability, and long-term maintainability')) },
+    { name: 'agy',     fn: () => delegateToAgy(prompt('performance, resource usage, and system-level issues')) }
   ];
   return runParallelWithDegradation(tasks, strict);
 }
@@ -537,7 +601,7 @@ async function runSecondOpinion(approach, agent = 'gemini') {
 
   if (!DELEGATE_FNS[agent]) throw new Error(`Unknown agent: ${agent}`);
 
-  const defaultOrder = ['gemini', 'claude', 'codex', 'kilo', 'cursor'];
+  const defaultOrder = ['gemini', 'claude', 'codex', 'kilo', 'cursor', 'agy'];
   let chosenAgent = agent;
 
   if (!checkCli(BINARIES[chosenAgent]).available) {
@@ -574,6 +638,7 @@ async function runVote(proposition) {
     { name: 'codex',   fn: () => delegateToCodex(prompt) },
     { name: 'cursor',  fn: () => delegateToCursor(prompt) },
     { name: 'kilo',    fn: () => delegateToKilo(prompt) },
+    { name: 'agy',     fn: () => delegateToAgy(prompt) },
   ];
 
   const { available, skipped } = filterAvailable(tasks);
@@ -654,6 +719,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     case 'delegate_kilo': {
       const task = requireString(args.task, 'task');
       return { content: [{ type: 'text', text: (await delegateToKilo(task)).trim() }] };
+    }
+    case 'delegate_agy': {
+      const task = requireString(args.task, 'task');
+      return { content: [{ type: 'text', text: (await delegateToAgy(task)).trim() }] };
     }
     case 'delegate_codex': {
       const task = requireString(args.task, 'task');
